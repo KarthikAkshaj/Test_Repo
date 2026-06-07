@@ -1,0 +1,36 @@
+name: AI Review
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Code Review
+        uses: mohit07raghav19/SecondLook@main
+        with:
+          review-command: run-inline
+        env:
+          VCS__PROVIDER: "GITHUB"
+          VCS__PIPELINE__OWNER: ${{ github.repository_owner }}
+          VCS__PIPELINE__REPO: ${{ github.event.repository.name }}
+          VCS__PIPELINE__PULL_NUMBER: ${{ github.event.pull_request.number }}
+          VCS__HTTP_CLIENT__API_URL: "https://api.github.com"
+          VCS__HTTP_CLIENT__API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+          LLM__PROVIDER: "GEMINI"
+          LLM__META__MODEL: "gemini-3.1-flash-lite"
+          LLM__META__MAX_TOKENS: "1200"
+          LLM__META__TEMPERATURE: "0.3"
+          LLM__HTTP_CLIENT__API_URL: "https://generativelanguage.googleapis.com"
+          LLM__HTTP_CLIENT__API_TOKEN: ${{ secrets.GEMINI_API_KEY }}
