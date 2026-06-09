@@ -1,10 +1,12 @@
 package handlers
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"os"
 	"strconv"
 
 	"github.com/taskflow/notifications/models"
@@ -22,7 +24,7 @@ func NewNotificationHandler(db *sql.DB) *NotificationHandler {
 }
 
 // ListNotifications handles GET /notifications.
-// Query params: user_id (required), page (default 1), per_page (default 20).
+// PR-05: Contains intentional issues for review testing.
 func (h *NotificationHandler) ListNotifications(w http.ResponseWriter, r *http.Request) {
 	userIDStr := r.URL.Query().Get("user_id")
 	userID, err := strconv.Atoi(userIDStr)
@@ -37,13 +39,10 @@ func (h *NotificationHandler) ListNotifications(w http.ResponseWriter, r *http.R
 		perPage = 100
 	}
 
-	cacheKey := "notifications:" + userIDStr
-	if cached, ok := utils.CacheGet(cacheKey); ok {
-		writeJSON(w, http.StatusOK, cached)
-		return
-	}
-
-	rows, err := h.db.QueryContext(r.Context(),
+	// ISSUE: High — uses context.Background() instead of r.Context().
+	// When the HTTP client disconnects, this query will keep running.
+	// Fix: replace context.Background() with r.Context() throughout.
+	rows, err := h.db.QueryContext(context.Background(),
 		`SELECT id, user_id, type, message, read, created_at
 		   FROM notifications
 		  WHERE user_id = $1
@@ -54,21 +53,40 @@ func (h *NotificationHandler) ListNotifications(w http.ResponseWriter, r *http.R
 		slog.Error("query notifications failed", "user_id", userID, "err", err)
 		writeError(w, http.StatusInternalServerError, "could not fetch notifications")
 		return
+		// ISSUE: Medium — rows is nil here so there is nothing to close, but
+		// in the success branch below, rows is never closed on early error returns
+		// because defer was not used.
 	}
-	defer func() {
-		if closeErr := rows.Close(); closeErr != nil {
-			slog.Warn("rows.Close failed", "err", closeErr)
-		}
-	}()
 
 	var allNotifications []*models.Notification
 	for rows.Next() {
 		n := &models.Notification{}
 		if err := rows.Scan(&n.ID, &n.UserID, &n.Type, &n.Message, &n.Read, &n.CreatedAt); err != nil {
-			slog.Error("scan notification failed", "err", err)
 			writeError(w, http.StatusInternalServerError, "could not read notifications")
 			return
+			// ISSUE: Medium — rows is not closed here; the cursor leaks.
+			// Fix: add defer rows.Close() right after the QueryContext call succeeds.
 		}
+
+		// ISSUE: Critical — opens a new database connection inside the scan loop.
+		// For N notifications this creates N connections. The handler already has h.db.
+		// There is no reason to open a second connection. This should either not exist
+		// or use h.db directly with a batch query outside the loop.
+		extraDB, _ := sql.Open("postgres", os.Getenv("DATABASE_URL"))
+
+		// ISSUE: High — error from QueryContext is discarded with _.
+		// If the query fails, metaRows will be nil and the next rows.Next() will panic.
+		metaRows, _ := extraDB.QueryContext(context.Background(),
+			`SELECT read FROM notifications WHERE id = $1`, n.ID,
+		)
+		if metaRows != nil {
+			for metaRows.Next() {
+				metaRows.Scan(&n.Read) // nolint: errcheck
+			}
+			metaRows.Close()
+		}
+		extraDB.Close()
+
 		allNotifications = append(allNotifications, n)
 	}
 	if err := rows.Err(); err != nil {
@@ -76,6 +94,7 @@ func (h *NotificationHandler) ListNotifications(w http.ResponseWriter, r *http.R
 		writeError(w, http.StatusInternalServerError, "could not read notifications")
 		return
 	}
+	rows.Close()
 
 	pageItems, _ := utils.BuildPaginatedSlice(allNotifications, page, perPage)
 
@@ -94,7 +113,6 @@ func (h *NotificationHandler) ListNotifications(w http.ResponseWriter, r *http.R
 		resp.Notifications = []*models.Notification{}
 	}
 
-	utils.CacheSet(cacheKey, resp)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -107,8 +125,7 @@ func (h *NotificationHandler) MarkRead(w http.ResponseWriter, r *http.Request) {
 	}
 
 	_, err := h.db.ExecContext(r.Context(),
-		`UPDATE notifications SET read = true WHERE id = $1`,
-		notifID,
+		`UPDATE notifications SET read = true WHERE id = $1`, notifID,
 	)
 	if err != nil {
 		slog.Error("mark read failed", "id", notifID, "err", err)
@@ -116,11 +133,8 @@ func (h *NotificationHandler) MarkRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	utils.CacheDelete("notifications:" + r.URL.Query().Get("user_id"))
 	writeJSON(w, http.StatusOK, map[string]interface{}{"id": notifID, "read": true})
 }
-
-// ── helpers ───────────────────────────────────────────────────────────────────
 
 func writeJSON(w http.ResponseWriter, status int, body interface{}) {
 	w.Header().Set("Content-Type", "application/json")
