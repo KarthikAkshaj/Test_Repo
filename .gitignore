@@ -2,6 +2,7 @@
 test-prs/
 guide.md
 setup-branches.sh
+commands.png
 
 # ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
