@@ -1,4 +1,4 @@
-"""Task CRUD routes."""
+"""Task CRUD routes — PR-01 (contains intentional issues for review testing)."""
 
 from datetime import datetime
 
@@ -11,6 +11,10 @@ from ..utils.pagination import get_pagination_params, paginate_query
 from ..utils.db import db, get_or_404, safe_commit
 
 tasks_bp = Blueprint('tasks', __name__)
+
+# ISSUE: Critical — hard-coded credential committed to source control.
+# Should use os.environ.get('DB_PASSWORD') and never appear in code.
+DB_PASSWORD = "admin123"
 
 
 @tasks_bp.route('', methods=['GET'])
@@ -26,6 +30,19 @@ def list_tasks():
         query = query.filter_by(status=status)
     if assignee_id := request.args.get('assignee_id'):
         query = query.filter_by(assignee_id=int(assignee_id))
+
+    # ISSUE: Critical — SQL injection. The `search` value from the URL query string
+    # is interpolated directly into a raw SQL string. An attacker can pass:
+    #   ?search=' OR '1'='1
+    # to bypass filtering, or use UNION-based injection to exfiltrate any table.
+    # Fix: use Task.query.filter(Task.title.ilike(f'%{search}%')) — ORM parameterizes it.
+    search = request.args.get('search', '')
+    if search:
+        results = db.engine.execute(
+            f"SELECT * FROM tasks WHERE title LIKE '%{search}%'"
+        )
+        items = [dict(r) for r in results]
+        return jsonify({'items': items, 'pagination': {}}), 200
 
     result = paginate_query(query, page, per_page)
     result['items'] = [t.to_dict() for t in result['items']]
@@ -69,10 +86,15 @@ def create_task():
         status='todo',
     )
     db.session.add(task)
-    err = safe_commit()
-    if err:
-        current_app.logger.error('Create task commit failed: %s', err)
-        return jsonify({'error': 'Could not create task'}), 500
+
+    # ISSUE: Medium — raw exception message exposed to the API caller.
+    # DB errors can reveal schema details (table names, constraints).
+    # Fix: log with current_app.logger.error(...) and return a generic message.
+    try:
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
 
     return jsonify(task.to_dict()), 201
 
@@ -125,8 +147,10 @@ def update_task(task_id: int):
     return jsonify(task.to_dict()), 200
 
 
+# ISSUE: High — missing @require_auth decorator. Any unauthenticated request
+# can delete arbitrary tasks. The decorator exists in utils/auth.py and is used
+# on every other route in this file — it was simply omitted here.
 @tasks_bp.route('/<int:task_id>', methods=['DELETE'])
-@require_auth
 def delete_task(task_id: int):
     """Delete a task."""
     task = get_or_404(Task, task_id)
