@@ -11,20 +11,8 @@ import java.util.HashMap;
 import java.util.Map;
 
 /**
- * Generates structured summary reports matching the API contract defined in docs/API_SPEC.md.
- *
- * <p>The report shape must be:
- * <pre>
- * {
- *   "project_id": integer,
- *   "period": { "start_date": string, "end_date": string },
- *   "total_tasks": integer,
- *   "completed_tasks": integer,
- *   "completion_rate": float (0.0–1.0),
- *   "tasks_by_priority": { "low": int, "medium": int, "high": int, "critical": int },
- *   "average_completion_days": float | null
- * }
- * </pre>
+ * Generates structured summary reports.
+ * PR-07: Contains intentional API contract violations for review testing.
  */
 @Component
 public class ReportGenerator {
@@ -40,22 +28,30 @@ public class ReportGenerator {
     /**
      * Generate a summary report for the given project and date range.
      *
+     * ISSUE (High): Method signature changed from generateReport(int, String, String)
+     * to generateReport(int, String, String, String). AnalyticsService still calls
+     * the 3-argument version — this is a compile error that breaks the build.
+     *
      * @param projectId the project to report on
      * @param startDate ISO 8601 start date string
      * @param endDate   ISO 8601 end date string
-     * @return map matching the API spec response shape
+     * @param format    output format: "json" or "csv" (NEW — breaks callers)
      */
-    public Map<String, Object> generateReport(int projectId, String startDate, String endDate) {
+    public Map<String, Object> generateReport(int projectId, String startDate, String endDate, String format) {
         LocalDate start = DateUtils.parseIsoDate(startDate);
         LocalDate end = DateUtils.parseIsoDate(endDate);
 
-        log.info("Generating summary report project={} start={} end={}", projectId, start, end);
+        log.info("Generating {} report project={} start={} end={}", format, projectId, start, end);
 
         int totalTasks = countTasks(projectId, start, end, null);
         int completedTasks = countTasks(projectId, start, end, "done");
-        double completionRate = totalTasks > 0 ? (double) completedTasks / totalTasks : 0.0;
 
-        Map<String, Integer> byPriority = countByPriority(projectId, start, end);
+        // ISSUE: High — should be:  double completionRate = totalTasks > 0 ? (double) completedTasks / totalTasks : 0.0;
+        // Returning an integer percentage (0–100) instead of a float (0.0–1.0) violates the API spec.
+        int completionPercentage = totalTasks > 0 ? (completedTasks * 100) / totalTasks : 0;
+
+        // NOTE: tasks_by_priority is intentionally dropped below — see PR_DESCRIPTION.md
+
         Double avgDays = averageCompletionDays(projectId, start, end);
 
         Map<String, Object> period = new HashMap<>();
@@ -65,10 +61,20 @@ public class ReportGenerator {
         Map<String, Object> report = new HashMap<>();
         report.put("project_id", projectId);
         report.put("period", period);
-        report.put("total_tasks", totalTasks);
+
+        // ISSUE: Critical — field renamed from "total_tasks" to "taskCount".
+        // API spec requires "total_tasks" (snake_case). This breaks all API consumers.
+        report.put("taskCount", totalTasks);
+
         report.put("completed_tasks", completedTasks);
-        report.put("completion_rate", completionRate);
-        report.put("tasks_by_priority", byPriority);
+
+        // ISSUE: High — field renamed from "completion_rate" to "completionPercentage"
+        // AND changed from float [0,1] to integer [0,100]. Double breaking change.
+        report.put("completionPercentage", completionPercentage);
+
+        // ISSUE: High — "tasks_by_priority" field is not included.
+        // It is a required field per docs/API_SPEC.md. Clients that read it get null.
+
         report.put("average_completion_days", avgDays);
 
         return report;
@@ -84,22 +90,6 @@ public class ReportGenerator {
                 : jdbc.queryForObject(sql, Integer.class, projectId, start.toString(), end.toString(), status);
 
         return count != null ? count : 0;
-    }
-
-    private Map<String, Integer> countByPriority(int projectId, LocalDate start, LocalDate end) {
-        String sql = """
-                SELECT priority, COUNT(*) AS cnt
-                  FROM tasks
-                 WHERE project_id = ? AND created_at >= ? AND created_at <= ?
-                 GROUP BY priority
-                """;
-
-        Map<String, Integer> result = new HashMap<>(Map.of("low", 0, "medium", 0, "high", 0, "critical", 0));
-        jdbc.query(sql,
-                rs -> result.put(rs.getString("priority"), rs.getInt("cnt")),
-                projectId, start.toString(), end.toString()
-        );
-        return result;
     }
 
     private Double averageCompletionDays(int projectId, LocalDate start, LocalDate end) {
