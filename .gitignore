@@ -1,0 +1,33 @@
+# ── Demo scaffolding (local only, never commit to main) ──────────────────────
+test-prs/
+guide.md
+setup-branches.sh
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.env
+instance/
+*.db
+
+# ── Node / TypeScript ─────────────────────────────────────────────────────────
+node_modules/
+dist/
+*.js.map
+
+# ── Java / Maven ──────────────────────────────────────────────────────────────
+target/
+*.class
+*.jar
+
+# ── Go ────────────────────────────────────────────────────────────────────────
+vendor/
+
+# ── OS / Editor ───────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
