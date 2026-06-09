@@ -19,7 +19,7 @@ jobs:
       - name: Code Review
         uses: mohit07raghav19/SecondLook@main
         with:
-          review-command: run-inline
+          review-command: run-summary
         env:
           VCS__PROVIDER: "GITHUB"
           VCS__PIPELINE__OWNER: ${{ github.repository_owner }}
