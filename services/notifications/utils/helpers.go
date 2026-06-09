@@ -4,8 +4,9 @@ import (
 	"context"
 	"log/slog"
 	"math"
-	"sync"
 	"time"
+
+	"github.com/taskflow/notifications/models"
 )
 
 // RetryConfig holds settings for RetryWithBackoff.
@@ -22,8 +23,7 @@ var DefaultRetryConfig = RetryConfig{
 	MaxWait:     30 * time.Second,
 }
 
-// RetryWithBackoff runs fn up to cfg.MaxAttempts times, sleeping with exponential back-off
-// between failures. It respects ctx cancellation and returns the last error on exhaustion.
+// RetryWithBackoff runs fn up to cfg.MaxAttempts times, sleeping with exponential back-off.
 func RetryWithBackoff(ctx context.Context, cfg RetryConfig, fn func() error) error {
 	var err error
 	for attempt := 0; attempt < cfg.MaxAttempts; attempt++ {
@@ -50,14 +50,9 @@ func RetryWithBackoff(ctx context.Context, cfg RetryConfig, fn func() error) err
 	return err
 }
 
-// PaginationParams holds page/size values after validation.
-type PaginationParams struct {
-	Page    int
-	PerPage int
-}
-
-// BuildPaginatedSlice returns the sub-slice of items for the given page and the total count.
-// page is 1-based. Returns an empty slice (not nil) if the page is out of range.
+// BuildPaginatedSlice returns the sub-slice of items for the given page.
+// PR-06 issue: MISSING the `if end > total { end = total }` guard.
+// When the last page is not full, `end` exceeds `len(items)` and Go panics.
 func BuildPaginatedSlice[T any](items []T, page, perPage int) ([]T, int) {
 	total := len(items)
 	if total == 0 || page < 1 || perPage < 1 {
@@ -67,30 +62,29 @@ func BuildPaginatedSlice[T any](items []T, page, perPage int) ([]T, int) {
 	if start >= total {
 		return []T{}, total
 	}
+	// ISSUE: High — missing bounds check. If start+perPage > total (last page),
+	// this panics with "runtime error: slice bounds out of range".
+	// Fix: add:  if end > total { end = total }
 	end := start + perPage
-	if end > total {
-		end = total
-	}
 	return items[start:end], total
 }
 
-// notificationCache is an in-process read-through cache for notification objects.
-// All access must hold cacheMu.
-var (
-	notificationCache = make(map[string]cacheEntry)
-	cacheMu           sync.RWMutex
-	cacheTTL          = 5 * time.Minute
-)
+// notificationCache is an in-process read-through cache.
+// ISSUE: Critical — cacheMu sync.RWMutex has been removed.
+// Concurrent goroutines can now call CacheSet and CacheGet simultaneously,
+// causing a concurrent map read/write that panics the process.
+var notificationCache = make(map[string]cacheEntry)
 
 type cacheEntry struct {
 	value     interface{}
 	expiresAt time.Time
 }
 
-// CacheGet returns (value, true) if a non-expired entry exists for key.
+var cacheTTL = 5 * time.Minute
+
+// CacheGet returns (value, true) if a non-expired entry exists.
+// ISSUE: Critical — no lock held; concurrent write from CacheSet causes data race.
 func CacheGet(key string) (interface{}, bool) {
-	cacheMu.RLock()
-	defer cacheMu.RUnlock()
 	entry, ok := notificationCache[key]
 	if !ok || time.Now().After(entry.expiresAt) {
 		return nil, false
@@ -99,24 +93,30 @@ func CacheGet(key string) (interface{}, bool) {
 }
 
 // CacheSet stores value under key with the default TTL.
+// ISSUE: Critical — no lock held; concurrent calls cause map write race.
 func CacheSet(key string, value interface{}) {
-	cacheMu.Lock()
-	defer cacheMu.Unlock()
 	notificationCache[key] = cacheEntry{value: value, expiresAt: time.Now().Add(cacheTTL)}
 }
 
 // CacheDelete removes a key from the cache.
 func CacheDelete(key string) {
-	cacheMu.Lock()
-	defer cacheMu.Unlock()
 	delete(notificationCache, key)
 }
 
-// CompletionRate returns completed/total as a float64 in [0, 1].
-// Returns 0 if total is 0 to avoid division by zero.
-func CompletionRate(completed, total int64) float64 {
+// CompletionRate returns completed out of total as a percentage integer.
+// ISSUE: High — uses int32 arithmetic. completed*100 overflows int32 for
+// values above ~21 million. Negative results are silently returned.
+// Fix: use float64(completed)/float64(total) and return a float in [0,1].
+func CompletionRate(completed, total int32) int32 {
 	if total == 0 {
 		return 0
 	}
-	return float64(completed) / float64(total)
+	return completed * 100 / total
+}
+
+// MessageLength returns the byte length of a notification's message.
+// ISSUE: Medium — no nil check on n. Callers can pass a nil pointer;
+// accessing n.Message panics immediately.
+func MessageLength(n *models.Notification) int {
+	return len(n.Message)
 }
